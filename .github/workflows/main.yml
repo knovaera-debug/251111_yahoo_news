@@ -1,10 +1,9 @@
-# .github/workflows/main.yml
-
-name: Run Yahoo News Scraper
+name: Yahoo News Scraper and Gemini Analyzer
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -12,34 +11,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. リポジトリのコードをチェックアウトする
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Python (3.10) をセットアップする
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 3. SeleniumのためにGoogle Chromeをインストールする
-      - name: Install Google Chrome
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-      
-      # 4. Pythonのライブラリをインストールする
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # ▼▼▼【Geminiエラー修正】ライブラリを強制的にアップグレード ▼▼▼
-          pip install --upgrade google-genai
-          # ▲▲▲
           pip install -r requirements.txt
-      
-      # 5. メインのPythonスクリプトを実行する
-      - name: Run main.py
+          
+          # --- (修正箇所) ---
+          # Gemimni APIのエラー (module 'google.genai' has no attribute 'configure') 対策
+          # キャッシュを無効化 (--no-cache-dir) し、強制的に最新版をインストールします。
+          pip install --no-cache-dir --upgrade google-generativeai
+          # --- (修正ここまで) ---
+
+      - name: Run Python script
         env:
           GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-        run: |
-          python main.py
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          SPREADSHEET_KEY: ${{ secrets.SPREADSHEET_KEY }}
+        run: python main.py
