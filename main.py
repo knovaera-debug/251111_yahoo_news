@@ -832,7 +832,9 @@ def sort_yahoo_sheet(gc: gspread.Client):
 
         # C列（3列目）を降順（新しい順）でソート
         # gspreadのsortメソッドを使用
-        worksheet.sort((3, 'desc'), range=sort_range)
+        # ▼▼▼【ソートエラー修正】 'desc' を 'des' に変更 ▼▼▼
+        worksheet.sort((3, 'des'), range=sort_range)
+        # ▲▲▲【ソートエラー修正】 'desc' を 'des' に変更 ▲▲▲
         print(" ✅ SOURCEシートを投稿日時の**新しい順**にスプレッドシート上で並び替えました。")
     except Exception as e:
         print(f" ⚠️ スプレッドシート上のソートエラー: {e}")
@@ -1094,7 +1096,7 @@ def analyze_with_gemini_and_update_sheet(gc: gspread.Client):
                 values=[['N/A(No Body)', 'N/A']],
                 value_input_option='USER_ENTERED'
             )
-            # ▲▲▲【修正】 P-R列 と AD-AE列 を N/A で埋める ▲▲▲
+            # ▲▲▲【修正】 P-R列 と AD-AE列 を N/A で埋める ▼▼▲
             
             update_count += 1 # N/A設定も「1件処理」としてカウントする
             time.sleep(1)
