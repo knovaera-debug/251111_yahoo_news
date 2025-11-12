@@ -121,8 +121,9 @@ def load_existing_urls(ws):
         return set()
 
 
-# --- (修正箇所 1/3) ---
+# --- (修正箇所) ---
 # Yahoo!ニュースのHTML構造変更（スクレイピング失敗）に対応
+# セレクタを全面的に見直しました。
 def get_yahoo_news_search_results(keyword):
     """
     指定されたキーワードで Yahoo!ニュースを検索し、
@@ -141,77 +142,96 @@ def get_yahoo_news_search_results(keyword):
         
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # (修正) 検索結果のコンテナ (ul.newsFeed_list は廃止された)
-        # 'Search__ResultList' のようなクラス名を持つ div を探す
-        search_results_container = soup.find("div", class_=re.compile(r"Search__ResultList"))
+        # --- (修正) コンテナを探す ---
+        # 1. (新) <ol class="newsFeed_list"> を探す
+        search_results_container = soup.find("ol", class_="newsFeed_list")
 
+        # 2. (新) <div class="newsFeed"> (小文字) を探す
         if not search_results_container:
-            # (フォールバック) 以前のセレクタも試す
-            search_results_container = soup.find("ul", class_="newsFeed_list")
+            search_results_container = soup.find("div", class_="newsFeed")
         
+        # 3. (旧) <div class="NewsFeed"> (大文字) を探す
         if not search_results_container:
-            # (フォールバック) さらに以前のセレクタ
              search_results_container = soup.find("div", class_="NewsFeed")
 
+        # 4. (旧) <div class...="Search__ResultList"> を探す
         if not search_results_container:
-            print("  - 検索結果のコンテナが見つかりません (Search__ResultList, newsFeed_list, NewsFeed のいずれか)。")
+            search_results_container = soup.find("div", class_=re.compile(r"Search__ResultList"))
+
+        if not search_results_container:
+            print(f"  - 検索結果のコンテナが見つかりません (ol.newsFeed_list, div.newsFeed, div.NewsFeed, Search__ResultList のいずれか)。")
             return []
 
-        # (修正) 記事要素 (li.newsFeed_item は廃止された)
-        # 'SearchResultItem' のようなクラス名を持つ li を探す
-        articles = search_results_container.find_all("li", class_=re.compile(r"SearchResultItem"))
-        
+        # --- (修正) 記事要素 (li) を探す ---
+        articles = search_results_container.find_all("li")
+
         if not articles:
-            # (フォールバック) 以前のセレクタ
+             # (旧) フォールバック: div.newsFeed_item を探す
             articles = search_results_container.find_all("div", class_="newsFeed_item")
 
         if not articles:
-            print("  - 記事要素 (SearchResultItem or newsFeed_item) が見つかりません。")
+            print("  - 記事要素 (li or div.newsFeed_item) が見つかりません。")
             return []
 
         results = []
         for article in articles:
             try:
-                # (修正) タイトルとURL
-                # 'SearchResultItem__Link' のようなクラス名を持つ a タグを探す
-                title_tag = article.find("a", class_=re.compile(r"SearchResultItem__Link"), href=re.compile(r"https://news.yahoo.co.jp/articles/"))
+                # --- (修正) 記事の「本文」領域のクラスをアンカーにする ---
+                body_tag = article.find("div", class_="newsFeed_item_body")
                 
-                if not title_tag:
-                    # (フォールバック) 以前のセレクタ
-                    title_tag = article.find("a", class_="newsFeed_item_link")
+                # body がない (広告liなど) 場合はスキップ
+                if not body_tag:
+                    continue
+
+                # body から親の <a> タグを探して URL を取得
+                title_tag = body_tag.find_parent("a")
                 
                 if not title_tag or "href" not in title_tag.attrs:
-                    continue # 記事リンクでない (例: PR)
+                    continue 
 
                 url = title_tag["href"]
+                
+                # 記事URL以外は除外
+                if not url.startswith("https://news.yahoo.co.jp/articles/"):
+                    continue
 
-                # (修正) タイトルテキスト
-                # 'SearchResultItem__Title' のようなクラス名を持つ h2 または div を探す
-                title_text_tag = article.find(re.compile(r"h2|div"), class_=re.compile(r"SearchResultItem__Title"))
-                if not title_text_tag:
-                    # (フォールバック) 以前のセレクタ
-                    title_text_tag = article.find("div", class_="newsFeed_item_title")
+                # --- (修正) タイトル、発行元、時間を取得 ---
+                # (クラス名が動的なため、タグの種類と構造で判断する)
+                
+                title = "（タイトル取得失敗）"
+                source = "発行元不明"
+                post_time_str = "時間不明"
 
-                title = title_text_tag.text.strip() if title_text_tag else title_tag.text.strip()
-                if not title:
-                    title = "（タイトル取得失敗）"
+                # 1. time タグを探す
+                time_tag = body_tag.find("time")
+                if time_tag:
+                    post_time_str = time_tag.text.strip()
+                    
+                    # 2. time タグの親から span (発行元) を探す
+                    meta_container = time_tag.find_parent("div")
+                    if meta_container:
+                        source_tag = meta_container.find("span")
+                        if source_tag:
+                            source = source_tag.text.strip()
 
+                # 3. タイトルを探す (一番厄介)
+                #    本文(newsFeed_item_body) の子要素にある div の中で、
+                #    クラス名が 'sc-' で始まるものを探し、その最初の子 div をタイトルとする
+                
+                # div.sc-278a0v-0 (text container) を探す
+                text_container = body_tag.find("div", class_=re.compile(r"^sc-278a0v-0")) # 恐らく動的
+                
+                if text_container:
+                     # div.sc-3ls169-0 (title) を探す
+                    title_text_tag = text_container.find("div", class_=re.compile(r"^sc-3ls169-0")) # 恐らく動的
+                    if title_text_tag:
+                        title = title_text_tag.get_text(strip=True) # get_text() で <em> タグも取得
 
-                # (修正) 発行元
-                # 'SearchResultItem__Media' のようなクラス名を持つ span を探す
-                source_tag = article.find("span", class_=re.compile(r"SearchResultItem__Media"))
-                if not source_tag:
-                    source_tag = article.find("span", class_="newsFeed_item_media")
-
-                source = source_tag.text.strip() if source_tag else "発行元不明"
-
-                # (修正) 投稿時間
-                # 'SearchResultItem__Date' のようなクラス名を持つ time タグを探す
-                time_tag = article.find("time", class_=re.compile(r"SearchResultItem__Date"))
-                if not time_tag:
-                    time_tag = article.find("time", class_="newsFeed_item_date")
-
-                post_time_str = time_tag.text.strip() if time_tag else "時間不明"
+                # (フォールバック) もし上記で見つからなければ、a タグ直下の最初の div を探す
+                if title == "（タイトル取得失敗）":
+                    first_div = title_tag.find("div", class_=re.compile(r"^sc-3ls169-0")) # 恐らく動的
+                    if first_div:
+                         title = first_div.get_text(strip=True)
 
                 results.append({
                     "title": title,
@@ -235,7 +255,7 @@ def get_yahoo_news_search_results(keyword):
         print(f"  ❌ Yahoo!ニュース検索処理エラー: {e}")
         traceback.print_exc()
         return []
-# --- (修正ここまで 1/3) ---
+# --- (修正ここまで) ---
 
 
 def parse_relative_time(time_str):
@@ -960,8 +980,7 @@ def analyze_with_gemini_and_update_sheet(gc):
         traceback.print_exc()
 
 
-# --- (修正箇所 2/3) ---
-# ヘッダー自動設定機能
+# (修正) ヘッダー自動設定機能
 def check_and_set_headers(ws):
     """
     ワークシートの1行目（ヘッダー）を確認し、
@@ -1007,7 +1026,7 @@ def check_and_set_headers(ws):
     else:
         print("  ✅ ヘッダー行は正常です。")
         return True
-# --- (修正ここまで 2/3) ---
+# --- (修正ここまで) ---
 
 
 def main():
@@ -1028,12 +1047,10 @@ def main():
         print("SOURCE ワークシートの取得に失敗。処理を終了します。")
         return
         
-    # --- (修正箇所 3/3) ---
-    # ヘッダーチェックを main() の最初に行う
+    # (修正) ヘッダーチェックを main() の最初に行う
     if not check_and_set_headers(ws):
         print("ヘッダー行の設定に失敗したため、処理を終了します。")
         return
-    # --- (修正ここまで 3/3) ---
         
     if not load_prompts():
         print("プロンプト読み込みに失敗。Gemini分析は実行されません。")
