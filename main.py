@@ -96,8 +96,6 @@ def get_worksheet(gc, sheet_name):
         worksheet = spreadsheet.worksheet(sheet_name)
         return worksheet
     except GSpreadAPIError as e:
-        # 'SOURCE' が存在しない場合などのエラー
-        # 前回のログ: "予期せぬエラー: SOURCE" がこれに該当
         print(f"  ❌ ワークシート '{sheet_name}' が見つからないか、アクセス権限がありません: {e}")
         return None
     except Exception as e:
@@ -121,14 +119,11 @@ def load_existing_urls(ws):
         return set()
 
 
-# --- (修正箇所) ---
-# Yahoo!ニュースのHTML構造変更（スクレイピング失敗）に対応
-# セレクタを全面的に見直しました。
+# (修正済) Yahoo!ニュースのHTML構造変更（一覧ページ）に対応
 def get_yahoo_news_search_results(keyword):
     """
     指定されたキーワードで Yahoo!ニュースを検索し、
     記事のタイトル、URL、発行元、投稿時間のリストを返す。
-    (セレクタを現在の動的クラス名に対応したものに変更)
     """
     print(f"  Yahoo!ニュース検索開始 (キーワード: {keyword})...")
     search_url = f"https://news.yahoo.co.jp/search?p={keyword}&ei=utf-8"
@@ -142,19 +137,16 @@ def get_yahoo_news_search_results(keyword):
         
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # --- (修正) コンテナを探す ---
-        # 1. (新) <ol class="newsFeed_list"> を探す
+        # --- コンテナを探す ---
+        # (新) <ol class="newsFeed_list"> を探す
         search_results_container = soup.find("ol", class_="newsFeed_list")
-
-        # 2. (新) <div class="newsFeed"> (小文字) を探す
+        # (新) <div class="newsFeed"> (小文字) を探す
         if not search_results_container:
             search_results_container = soup.find("div", class_="newsFeed")
-        
-        # 3. (旧) <div class="NewsFeed"> (大文字) を探す
+        # (旧) <div class="NewsFeed"> (大文字) を探す
         if not search_results_container:
              search_results_container = soup.find("div", class_="NewsFeed")
-
-        # 4. (旧) <div class...="Search__ResultList"> を探す
+        # (旧) <div class...="Search__ResultList"> を探す
         if not search_results_container:
             search_results_container = soup.find("div", class_=re.compile(r"Search__ResultList"))
 
@@ -162,11 +154,9 @@ def get_yahoo_news_search_results(keyword):
             print(f"  - 検索結果のコンテナが見つかりません (ol.newsFeed_list, div.newsFeed, div.NewsFeed, Search__ResultList のいずれか)。")
             return []
 
-        # --- (修正) 記事要素 (li) を探す ---
+        # --- 記事要素 (li) を探す ---
         articles = search_results_container.find_all("li")
-
         if not articles:
-             # (旧) フォールバック: div.newsFeed_item を探す
             articles = search_results_container.find_all("div", class_="newsFeed_item")
 
         if not articles:
@@ -176,7 +166,7 @@ def get_yahoo_news_search_results(keyword):
         results = []
         for article in articles:
             try:
-                # --- (修正) 記事の「本文」領域のクラスをアンカーにする ---
+                # --- 記事の「本文」領域のクラスをアンカーにする ---
                 body_tag = article.find("div", class_="newsFeed_item_body")
                 
                 # body がない (広告liなど) 場合はスキップ
@@ -195,43 +185,45 @@ def get_yahoo_news_search_results(keyword):
                 if not url.startswith("https://news.yahoo.co.jp/articles/"):
                     continue
 
-                # --- (修正) タイトル、発行元、時間を取得 ---
-                # (クラス名が動的なため、タグの種類と構造で判断する)
-                
+                # --- タイトル、発行元、時間を取得 ---
                 title = "（タイトル取得失敗）"
                 source = "発行元不明"
                 post_time_str = "時間不明"
 
-                # 1. time タグを探す
+                # time タグを探す
                 time_tag = body_tag.find("time")
                 if time_tag:
                     post_time_str = time_tag.text.strip()
                     
-                    # 2. time タグの親から span (発行元) を探す
+                    # time タグの親から span (発行元) を探す
                     meta_container = time_tag.find_parent("div")
                     if meta_container:
                         source_tag = meta_container.find("span")
                         if source_tag:
                             source = source_tag.text.strip()
 
-                # 3. タイトルを探す (一番厄介)
-                #    本文(newsFeed_item_body) の子要素にある div の中で、
-                #    クラス名が 'sc-' で始まるものを探し、その最初の子 div をタイトルとする
+                # タイトルを探す (動的クラス名 `sc-` に依存しない方法)
+                # 'newsFeed_item_body' の中にある 'a' タグの 'div' でクラス名が 'sc-' で始まるものを探す
+                title_text_tag = body_tag.find("div", class_=re.compile(r"^sc-3ls169-0")) # 暫定的な目印
                 
-                # div.sc-278a0v-0 (text container) を探す
-                text_container = body_tag.find("div", class_=re.compile(r"^sc-278a0v-0")) # 恐らく動的
-                
-                if text_container:
-                     # div.sc-3ls169-0 (title) を探す
-                    title_text_tag = text_container.find("div", class_=re.compile(r"^sc-3ls169-0")) # 恐らく動的
-                    if title_text_tag:
-                        title = title_text_tag.get_text(strip=True) # get_text() で <em> タグも取得
+                if not title_text_tag:
+                    # 'sc-' で始まるクラスを持つ div を全て探し、その中のテキストを結合する (堅牢性を高める)
+                    title_divs = body_tag.select("div[class*='sc-']")
+                    if title_divs:
+                        # 最初の 'sc-' クラスの div をタイトルとする
+                        title = title_divs[0].get_text(strip=True)
 
-                # (フォールバック) もし上記で見つからなければ、a タグ直下の最初の div を探す
+                if title_text_tag and title == "（タイトル取得失敗）":
+                        title = title_text_tag.get_text(strip=True)
+
+                # <em> タグ内のテキストも取得（キーワードがハイライトされている場合）
+                if title == "（タイトル取得失敗）" and title_tag.find("div", class_=re.compile(r"newsFeed_item_title")):
+                     title = title_tag.find("div", class_=re.compile(r"newsFeed_item_title")).get_text(strip=True)
+                
                 if title == "（タイトル取得失敗）":
-                    first_div = title_tag.find("div", class_=re.compile(r"^sc-3ls169-0")) # 恐らく動的
-                    if first_div:
-                         title = first_div.get_text(strip=True)
+                    # 最終手段
+                    title = title_tag.get_text(strip=True).split("\n")[0]
+
 
                 results.append({
                     "title": title,
@@ -255,7 +247,6 @@ def get_yahoo_news_search_results(keyword):
         print(f"  ❌ Yahoo!ニュース検索処理エラー: {e}")
         traceback.print_exc()
         return []
-# --- (修正ここまで) ---
 
 
 def parse_relative_time(time_str):
@@ -272,7 +263,6 @@ def parse_relative_time(time_str):
         try:
             return now.replace(month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0)
         except ValueError:
-            # 閏年などで存在しない日付の場合、去年の日付として扱う
              return now.replace(year=now.year - 1, month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0)
 
     # 2. '○分前' 形式
@@ -295,9 +285,9 @@ def parse_relative_time(time_str):
             hour, minute = map(int, match.groups())
             return (now - timedelta(days=day_delta)).replace(hour=hour, minute=minute, second=0, microsecond=0)
         else:
-            return now - timedelta(days=day_delta) # 時間不明なら0時0分
+            return now - timedelta(days=day_delta)
 
-    # 5. '○日前' 形式 (7日以上前は '11/11' 形式になるはずだが念のため)
+    # 5. '○日前' 形式
     match = re.search(r"(\d+)日前", time_str)
     if match:
         days = int(match.group(1))
@@ -307,6 +297,8 @@ def parse_relative_time(time_str):
     return None
 
 
+# --- (修正箇所) ---
+# 記事本文ページのHTML構造変更に対応
 def get_article_details(article_url):
     """
     記事URLから本文（最大10ページ）、コメント数、正確な投稿日時を取得する。
@@ -328,27 +320,27 @@ def get_article_details(article_url):
         # コメント数 (動的クラス名対応)
         comment_count_tag = soup.find("a", class_=re.compile(r"CommentCount__CommentCountButton"), href=re.compile(r"/comments/"))
         if not comment_count_tag:
-            # (フォールバック)
-            comment_count_tag = soup.find("a", href=re.compile(r"/comments/"))
-
+            # (フォールバック) sc-1n9vtw0-1 (コメントボタン)
+            comment_count_tag = soup.find("button", class_=re.compile(r"sc-1n9vtw0-1"))
+        
         if comment_count_tag:
-            # "コメントN件" または "N"
             match = re.search(r"(\d+)", comment_count_tag.text)
             if match:
                 comment_count = match.group(1)
 
-        # 正確な投稿日時 (セレクタは変更の可能性大)
+        # 正確な投稿日時
         time_tag = soup.find("time")
         if time_tag and time_tag.has_attr("datetime"):
             try:
-                # ISO 8601 形式 (例: 2023-11-10T10:00:00.000Z)
                 full_post_time = datetime.fromisoformat(time_tag["datetime"].replace("Z", "+00:00"))
             except ValueError:
                 print(f"  - 日時パース失敗: {time_tag['datetime']}")
                 full_post_time = None
 
-        # 記事本文 (1ページ目) (動的クラス名対応)
-        body_container = soup.find("div", class_=re.compile(r"ArticleBody"))
+        # --- (修正) 記事本文 (1ページ目) ---
+        # 旧: class_=re.compile(r"ArticleBody")
+        # 新: class="article_body"
+        body_container = soup.find("div", class_="article_body")
         
         if body_container:
             # 本文テキスト
@@ -365,17 +357,16 @@ def get_article_details(article_url):
             try:
                 response_page = requests.get(next_page_url, headers=headers)
                 
-                # ページが存在しない場合 (404など)
                 if response_page.status_code != 200:
                     print(f"  - 記事本文 ページ {page_num} は存在しませんでした。本文取得を完了します。")
-                    break # ループ中断
+                    break 
                 
                 soup_page = BeautifulSoup(response_page.text, "html.parser")
-                body_container_page = soup_page.find("div", class_=re.compile(r"ArticleBody"))
+                # --- (修正) 2ページ目以降の本文 ---
+                body_container_page = soup_page.find("div", class_="article_body")
                 
                 if body_container_page:
                     body_text_page = body_container_page.get_text(separator="\n", strip=True)
-                    # 1ページ目と同じ内容かチェック (ページネーションの終端判定)
                     if body_text_page == article_body_parts[0]:
                          print(f"  - 記事本文 ページ {page_num} は1ページ目と同じ内容のため終了します。")
                          break
@@ -384,18 +375,17 @@ def get_article_details(article_url):
                     article_body_parts.append(body_text_page)
                 else:
                     print(f"  - 記事本文 ページ {page_num} が見つかりませんでした。")
-                    break # コンテナが見つからなければ終了
+                    break
                 
-                time.sleep(1) # サーバー負荷軽減
+                time.sleep(1) 
 
             except requests.exceptions.RequestException as re_e:
-                # ページネーション中のエラー (404 Client Error など)
                 if "404" in str(re_e):
                     print(f"  ❌ ページなし (404 Client Error): {next_page_url}")
                     print(f"  - 記事本文 ページ {page_num} は存在しませんでした。本文取得を完了します。")
                 else:
                     print(f"  ❌ ページ {page_num} 取得エラー: {re_e}")
-                break # エラーが発生したら中断
+                break
             except Exception as e_page:
                 print(f"  ❌ ページ {page_num} 処理エラー: {e_page}")
                 break
@@ -408,7 +398,6 @@ def get_article_details(article_url):
         traceback.print_exc()
         return ["（本文取得失敗）"] * 10, "0", None
 
-    # 10件に満たない場合は「-」で埋める
     if len(article_body_parts) < 10:
         article_body_parts.extend(["-"] * (10 - len(article_body_parts)))
     
@@ -417,8 +406,7 @@ def get_article_details(article_url):
 
 def load_prompts():
     """
-    グローバル変数 PROMPT_FILES に基づいて、
-    プロンプトファイルを読み込み、グローバル変数 PROMPTS に格納する。
+    プロンプトファイルを読み込む。
     """
     global PROMPTS
     print("  プロンプトファイルを読み込んでいます...")
@@ -460,7 +448,6 @@ def initialize_gemini():
              print("  ⚠️ 警告: genai.configure が見つかりません。APIキーの手動設定を試みます。")
              pass 
         
-        # 安定板の 'gemini-pro' を使用
         model = genai.GenerativeModel('gemini-pro')
         
         if not hasattr(genai, "configure"):
@@ -477,9 +464,7 @@ def initialize_gemini():
 
 def analyze_article_with_gemini(article_body):
     """
-    記事本文を受け取り、Gemini API を使って
-    sentiment, category, company_info, nissan_mention, nissan_sentiment を
-    JSON 形式で返す。
+    記事本文を受け取り、Gemini API で分析する。
     """
     if not gemini_model:
         return {
@@ -487,7 +472,6 @@ def analyze_article_with_gemini(article_body):
             "nissan_mention": "N/A", "nissan_sentiment": "N/A"
         }
 
-    # 本文が長すぎる場合、先頭の10000文字程度に丸める
     max_length = 10000
     if len(article_body) > max_length:
         article_body = article_body[:max_length]
@@ -548,7 +532,6 @@ def analyze_article_with_gemini(article_body):
         json_str = json_match.group(0)
         result = json.loads(json_str)
         
-        # 必要なキーが揃っているか確認
         required_keys = ["sentiment", "category", "company_info", "nissan_mention", "nissan_sentiment"]
         if not all(key in result for key in required_keys):
              print(f"  ❌ Gemini応答JSONに必要なキーが不足しています。 {result.keys()}")
@@ -580,10 +563,12 @@ def analyze_article_with_gemini(article_body):
         }
 
 
+# --- (修正箇所) ---
+# コメント欄のHTML構造変更（動的クラス名）に対応
 def get_yahoo_news_comments(article_id, article_url):
     """
     記事IDと記事URLを受け取り、コメントページの1〜3ページ目までをスクレイピングする。
-    (修正済：新しいコメントURL形式 `.../articles/{ID}/comments` に対応)
+    (動的な `sc-` クラス名に対応)
     """
     print(f"    - コメント本文 (S列～AC列) を取得中...")
     comments_data = []
@@ -592,7 +577,6 @@ def get_yahoo_news_comments(article_id, article_url):
     }
 
     try:
-        # (修正済) 新しいURL形式
         base_comments_url = f"{article_url}/comments"
         
         for page_num in range(1, 4): # 1ページから3ページまで
@@ -609,25 +593,40 @@ def get_yahoo_news_comments(article_id, article_url):
 
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # (修正済) 動的クラス名対応
-            comments = soup.select("div[class*='CommentItem__Container']") 
+            # --- (修正) 動的クラス名対応 ---
+            # 1. コメント欄のメインコンテナを探す
+            comment_main = soup.find("article", id="comment-main")
+            if not comment_main:
+                 print(f"    - コメント ページ {page_num} に 'comment-main' コンテナが見つかりません。")
+                 break
+
+            # 2. コンテナ内の全 <article> タグ (これが各コメント) を探す
+            #    (専門家コメント `sc-z8tf0-1`、一般コメント `sc-169yn8p-3` に対応)
+            comments = comment_main.find_all("article", class_=re.compile(r"sc-"))
             
             if not comments:
-                comments = soup.select("div.comment-list-item")
-            
-            if not comments:
+                # print(f"    - コメント ページ {page_num} にコメントが見つかりませんでした。")
                 break 
 
             for comment in comments:
-                user_name_tag = comment.select_one("h3[class*='CommentItem__UserName']")
-                user_name = user_name_tag.text.strip() if user_name_tag else "ユーザー名不明"
+                user_name = "ユーザー名不明"
+                comment_text = "コメント本文なし"
+                
+                # 3. ユーザー名 (h2 タグ) を探す
+                user_name_tag = comment.find("h2")
+                if user_name_tag:
+                    user_name = user_name_tag.get_text(strip=True)
 
-                comment_text_tag = comment.select_one("p[class*='CommentItem__Text']")
-                comment_text = comment_text_tag.text.strip() if comment_text_tag else "コメント本文なし"
+                # 4. コメント本文 (p タグ) を探す
+                #    (専門家 `sc-z8tf0-11`、一般 `sc-169yn8p-10` に対応する p タグ)
+                comment_text_tag = comment.find("p", class_=re.compile(r"sc-.*-\d{1,2}$"))
+                
+                if comment_text_tag:
+                    comment_text = comment_text_tag.get_text(strip=True)
 
                 comments_data.append(f"【{user_name}】{comment_text}")
 
-                if len(comments_data) >= 10: 
+                if len(comments_data) >= 10: # 10件取得したら終了
                     break
             
             if len(comments_data) >= 10:
@@ -649,6 +648,7 @@ def get_yahoo_news_comments(article_id, article_url):
         print(f"    ❌ コメント取得エラー: {e}")
         traceback.print_exc()
         return ["取得不可"] * 10
+# --- (修正ここまで) ---
 
 
 def update_source_sheet(ws, new_articles, existing_urls):
@@ -892,15 +892,11 @@ def analyze_with_gemini_and_update_sheet(gc):
             nissan_sentiment_col_idx = headers.index("nissan_sentiment") + 1 # AE列
 
         except ValueError as e:
-            # (修正) ヘッダー不足エラー
-            # 前回のログ: "'title' is not in list" がこれに該当
             print(f"  ❌ 必要な列が見つかりません: {e}。分析を中断します。")
             print(f"  (取得したヘッダー: {headers})")
             return
         
-        # (修正済) API 429 エラー対策
         batch_updates = []
-
         count = 0
         max_analyze = 30 # 最大分析件数
 
@@ -944,7 +940,6 @@ def analyze_with_gemini_and_update_sheet(gc):
                     nissan_mention = analysis_result.get("nissan_mention", "N/A")
                     nissan_sentiment = analysis_result.get("nissan_sentiment", "N/A")
 
-                    # (修正済) API 429 エラー対策
                     # メインの分析結果 (P列〜R列)
                     batch_updates.append({
                         'range': f"{gspread.utils.rowcol_to_a1(row_index, sentiment_col_idx)}:{gspread.utils.rowcol_to_a1(row_index, company_info_col_idx)}",
@@ -963,7 +958,6 @@ def analyze_with_gemini_and_update_sheet(gc):
                 print(f"  ❌ 行 {row_index} の処理中にエラー: {e}")
                 traceback.print_exc()
 
-        # (修正済) API 429 エラー対策
         if batch_updates:
             print(f"  ... {len(batch_updates) // 2} 件の分析結果をスプレッドシートに一括書き込み中 ...")
             try:
@@ -1003,19 +997,15 @@ def check_and_set_headers(ws):
     try:
         current_headers = ws.row_values(1)
     except GSpreadAPIError as e:
-        # シートが完全に空の場合 (get row 1 が失敗する)
         print(f"  シートが空のようです (エラー: {e})。")
         current_headers = []
     except Exception as e:
         print(f"  ヘッダー行の読み取りに失敗: {e}")
         current_headers = []
 
-    # 既存ヘッダーが期待値と異なる場合 (空の場合も含む)
     if current_headers != expected_headers:
         print("  ヘッダー行が不足または不整合です。1行目にヘッダーを自動設定します...")
         try:
-            # A1セルから始まる行を expected_headers の内容で上書き/設定
-            # (注: 列数が33列 (AG列) 必要です)
             ws.update('A1', [expected_headers], value_input_option='RAW')
             print("  ✅ ヘッダー行を更新しました。")
             return True
@@ -1026,7 +1016,6 @@ def check_and_set_headers(ws):
     else:
         print("  ✅ ヘッダー行は正常です。")
         return True
-# --- (修正ここまで) ---
 
 
 def main():
@@ -1047,7 +1036,6 @@ def main():
         print("SOURCE ワークシートの取得に失敗。処理を終了します。")
         return
         
-    # (修正) ヘッダーチェックを main() の最初に行う
     if not check_and_set_headers(ws):
         print("ヘッダー行の設定に失敗したため、処理を終了します。")
         return
